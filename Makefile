@@ -2,7 +2,7 @@ NAME = webserv
 CC = c++ 
 CPPFLAGS = #-Wall -Wextra -Werror
 CPPVERSION = #-std=c++98
-SRCS = Webserv.cpp ./Config/Config.cpp
+SRCS = Webserv.cpp ./Config/Config.cpp ./Config/Route.cpp
 OBJS = $(SRCS:.cpp=.o)
 
 all: $(NAME)

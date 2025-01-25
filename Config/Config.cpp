@@ -15,6 +15,9 @@ std::string readConfigFile(std::string path) {
     std::string line;
     while (std::getline(file, line))
         config_content += line + "\n";
+        // std::cerr << config_content.size() << std::endl;
+    if (config_content.size() == 0)
+        throw std::runtime_error("Empty configuration file");
     return config_content;
 }
 
