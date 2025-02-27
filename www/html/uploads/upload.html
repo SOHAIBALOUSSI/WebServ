@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Upload</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="text"], input[type="file"] {
+            width: 100%;
+            padding: 8px;
+            margin-top: 5px;
+            box-sizing: border-box;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .radio-group {
+            margin: 10px 0;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        #status {
+            margin-top: 20px;
+            padding: 10px;
+            border-radius: 4px;
+            display: none;
+        }
+        .success {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+        }
+        .error {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+        progress {
+            width: 100%;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>File Upload</h2>
+        
+        <div class="form-group">
+            <label for="uploadPath">Upload Path:</label>
+            <input type="text" id="uploadPath" value="/uploads/" placeholder="Path on server">
+        </div>
+        
+        <div class="form-group">
+            <label for="fileInput">Select File:</label>
+            <input type="file" id="fileInput">
+        </div>
+        
+        <div class="form-group">
+            <label>Transfer Method:</label>
+            <div class="radio-group">
+                <input type="radio" id="contentLength" name="transferMethod" value="contentLength" checked>
+                <label for="contentLength">Content-Length</label>
+            </div>
+            <div class="radio-group">
+                <input type="radio" id="chunked" name="transferMethod" value="chunked">
+                <label for="chunked">Chunked Transfer Encoding</label>
+            </div>
+        </div>
+        
+        <div class="form-group" id="chunkSizeContainer" style="display: none;">
+            <label for="chunkSize">Chunk Size (bytes):</label>
+            <input type="text" id="chunkSize" value="1048576" placeholder="Enter chunk size in bytes">
+        </div>
+        
+        <button id="uploadButton">Upload File</button>
+        
+        <div id="progressContainer" style="display: none;">
+            <h4>Upload Progress:</h4>
+            <progress id="uploadProgress" value="0" max="100"></progress>
+            <div id="progressText">0%</div>
+        </div>
+        
+        <div id="status"></div>
+    </div>
+
+    <script>
+        // Show/hide chunk size option when transfer method changes
+        document.querySelectorAll('input[name="transferMethod"]').forEach(radio => {
+            radio.addEventListener('change', function() {
+                document.getElementById('chunkSizeContainer').style.display = 
+                    this.value === 'chunked' ? 'block' : 'none';
+            });
+        });
+
+        document.getElementById('uploadButton').addEventListener('click', async function() {
+            const fileInput = document.getElementById('fileInput');
+            const uploadPath = document.getElementById('uploadPath').value.trim();
+            const transferMethod = document.querySelector('input[name="transferMethod"]:checked').value;
+            const statusDiv = document.getElementById('status');
+            const progressBar = document.getElementById('uploadProgress');
+            const progressText = document.getElementById('progressText');
+            const progressContainer = document.getElementById('progressContainer');
+            
+            // Validate inputs
+            if (!fileInput.files || fileInput.files.length === 0) {
+                showStatus('Please select a file to upload', 'error');
+                return;
+            }
+            
+            if (!uploadPath) {
+                showStatus('Please enter an upload path', 'error');
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            
+            // Prepare UI for upload
+            statusDiv.style.display = 'none';
+            progressContainer.style.display = 'block';
+            progressBar.value = 0;
+            progressText.textContent = '0%';
+            
+            try {
+                if (transferMethod === 'contentLength') {
+                    await uploadWithContentLength(file, uploadPath);
+                } else {
+                    const chunkSize = parseInt(document.getElementById('chunkSize').value, 10);
+                    if (isNaN(chunkSize) || chunkSize <= 0) {
+                        showStatus('Please enter a valid chunk size', 'error');
+                        progressContainer.style.display = 'none';
+                        return;
+                    }
+                    await uploadChunked(file, uploadPath, chunkSize);
+                }
+            } catch (error) {
+                showStatus(`Upload failed: ${error.message}`, 'error');
+            }
+        });
+
+        async function uploadWithContentLength(file, uploadPath) {
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            const xhr = new XMLHttpRequest();
+            
+            // Set up progress tracking
+            xhr.upload.addEventListener('progress', (event) => {
+                if (event.lengthComputable) {
+                    const percent = Math.round((event.loaded / event.total) * 100);
+                    document.getElementById('uploadProgress').value = percent;
+                    document.getElementById('progressText').textContent = `${percent}%`;
+                }
+            });
+            
+            return new Promise((resolve, reject) => {
+                xhr.addEventListener('load', function() {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        showStatus(`File "${file.name}" uploaded successfully!`, 'success');
+                        resolve();
+                    } else {
+                        reject(new Error(`Server returned status code ${xhr.status}`));
+                    }
+                });
+                
+                xhr.addEventListener('error', () => reject(new Error('Network error occurred')));
+                
+                xhr.open('POST', uploadPath, true);
+                // No need to explicitly set Content-Length, the browser will do it automatically
+                xhr.send(formData);
+            });
+        }
+
+        async function uploadChunked(file, uploadPath, chunkSize) {
+            const totalChunks = Math.ceil(file.size / chunkSize);
+            let chunkIndex = 0;
+            
+            // Create a session ID for this upload
+            const sessionId = `upload_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+            
+            while (chunkIndex < totalChunks) {
+                const start = chunkIndex * chunkSize;
+                const end = Math.min(start + chunkSize, file.size);
+                const chunk = file.slice(start, end);
+                
+                await uploadChunk(chunk, uploadPath, {
+                    sessionId: sessionId,
+                    chunkIndex: chunkIndex,
+                    totalChunks: totalChunks,
+                    filename: file.name
+                });
+                
+                chunkIndex++;
+                
+                // Update progress
+                const percent = Math.round((chunkIndex / totalChunks) * 100);
+                document.getElementById('uploadProgress').value = percent;
+                document.getElementById('progressText').textContent = `${percent}%`;
+            }
+            
+            showStatus(`File "${file.name}" uploaded successfully!`, 'success');
+        }
+
+        async function uploadChunk(chunk, uploadPath, metadata) {
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                
+                xhr.addEventListener('load', function() {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        resolve();
+                    } else {
+                        reject(new Error(`Server returned status code ${xhr.status}`));
+                    }
+                });
+                
+                xhr.addEventListener('error', () => reject(new Error('Network error occurred')));
+                
+                xhr.open('POST', `${uploadPath}?session=${metadata.sessionId}&chunk=${metadata.chunkIndex}&total=${metadata.totalChunks}&filename=${encodeURIComponent(metadata.filename)}`, true);
+                xhr.setRequestHeader('X-File-Session-ID', metadata.sessionId);
+                xhr.setRequestHeader('X-Chunk-Index', metadata.chunkIndex.toString());
+                xhr.setRequestHeader('X-Total-Chunks', metadata.totalChunks.toString());
+                xhr.setRequestHeader('X-File-Name', metadata.filename);
+                xhr.setRequestHeader('Transfer-Encoding', 'chunked');
+                xhr.send(chunk);
+            });
+        }
+
+        function showStatus(message, type) {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.className = type;
+            statusDiv.style.display = 'block';
+            document.getElementById('progressContainer').style.display = 'none';
+        }
+    </script>
+</body>
+</html>
