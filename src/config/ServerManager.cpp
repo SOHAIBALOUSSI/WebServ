@@ -160,69 +160,87 @@ void ServerManager::sendResponse(int clientSocket) {
     Client& client = It->second;
     HttpResponse& response = client.getResponse();
     
-    switch (client.getClientState())
-    {
+    switch (client.getClientState()) {
         case GENERATING_RESPONSE: {
             client.setKeepAlive(client.shouldKeepAlive());
             client.sendBuffer = response.responseHeaders;
+            std::cout << "Sending Headers:\n" << client.sendBuffer << "\n"; // Debug
             response.responseHeaders.clear();
             client.setState(SENDING_HEADERS);
+            break;
         }
         case SENDING_HEADERS: {
-            if (response.statusCode >= 400) {
-                client.sendBuffer += response.responseBody;
-            }
-            ssize_t bytesSent = send(clientSocket,client.sendBuffer.c_str() + client.sendOffset,client.sendBuffer.size() - client.sendOffset, MSG_NOSIGNAL);
-            if (bytesSent < 0)
+            ssize_t bytesSent = send(clientSocket, client.sendBuffer.c_str() + client.sendOffset,
+                                    client.sendBuffer.size() - client.sendOffset, MSG_NOSIGNAL);
+            if (bytesSent < 0) {
+                std::cerr << "Send headers failed: " << strerror(errno) << "\n";
                 return closeConnection(clientSocket);
+            }
             client.sendOffset += bytesSent;
             if (client.sendOffset >= client.sendBuffer.size()) {
                 client.sendBuffer.clear();
                 client.sendOffset = 0;
-                client.setState(SENDING_BODY);
-            }
-            if (response.statusCode >= 400 || response.statusCode == 201 || response.statusCode == 301) {
-                client.setState(COMPLETED);
-                goto complete;
-            }
-        }
-        break;
-        case SENDING_BODY: {
-            if (client.sendBuffer.empty()) {
-                if (!client.file.is_open()) {
+                // Check if CGI response (responseBody) or static file
+                if (!response.responseBody.empty()) {
+                    client.sendBuffer = response.responseBody;
+                    std::cout << "Sending CGI Body:\n" << client.sendBuffer << "\n"; // Debug
+                    client.setState(SENDING_BODY);
+                } else if (response.statusCode < 400) { // Static file
                     client.file.open(client.getRequest().getUriPath().c_str(), std::ios::binary);
                     if (!client.file.is_open()) {
+                        std::cerr << "Failed to open file: " << client.getRequest().getUriPath() << "\n";
                         client.setState(COMPLETED);
-                        break;
+                    } else {
+                        client.setState(SENDING_BODY);
+                    }
+                } else {
+                    client.setState(COMPLETED); // No body for errors or redirects
+                }
+            }
+            break;
+        }
+        case SENDING_BODY: {
+            if (client.sendBuffer.empty()) {
+                if (client.file.is_open()) { // Static file case
+                    char buffer[8192];
+                    client.file.read(buffer, 8192);
+                    std::streamsize bytesRead = client.file.gcount();
+                    if (bytesRead > 0) {
+                        client.sendBuffer.append(buffer, bytesRead);
+                        std::cout << "Sending File Chunk: " << bytesRead << " bytes\n"; // Debug
+                    } else {
+                        client.file.close();
+                        client.setState(COMPLETED);
+                    }
+                } else if (!response.responseBody.empty()) { // CGI case (already loaded)
+                    client.setState(COMPLETED);
+                } else {
+                    client.setState(COMPLETED); // Shouldn’t happen
+                }
+            }
+
+            if (!client.sendBuffer.empty()) {
+                ssize_t bytesSent = send(clientSocket, client.sendBuffer.c_str() + client.sendOffset,
+                                        client.sendBuffer.size() - client.sendOffset, MSG_NOSIGNAL);
+                if (bytesSent < 0) {
+                    std::cerr << "Send body failed: " << strerror(errno) << "\n";
+                    return closeConnection(clientSocket);
+                }
+                client.sendOffset += bytesSent;
+                if (client.sendOffset >= client.sendBuffer.size()) {
+                    client.sendBuffer.clear();
+                    client.sendOffset = 0;
+                    if (!client.file.is_open()) { // CGI case, body fully sent
+                        client.setState(COMPLETED);
                     }
                 }
-
-                char buffer[8192];
-                client.file.read(buffer, 8192);
-                std::streamsize bytesRead = client.file.gcount();
-                
-                if (bytesRead > 0) {
-                    client.sendBuffer.append(buffer, bytesRead);
-                } else {
-                    client.setState(COMPLETED);
-                }
             }
-
-            ssize_t bytesSent = send(clientSocket, client.sendBuffer.c_str() + client.sendOffset,
-                                                    client.sendBuffer.size() - client.sendOffset, MSG_NOSIGNAL);
-            if (bytesSent < 0) {
-                return closeConnection(clientSocket);
-            }
-            client.sendOffset += bytesSent;
-            if (client.sendOffset >= client.sendBuffer.size()) {
-                client.sendBuffer.clear();
-                client.sendOffset = 0;
-            }
+            break;
         }
-        break;
-        complete:
         case COMPLETED: {
-            client.file.close();
+            if (client.file.is_open()) {
+                client.file.close();
+            }
             if (response.statusCode == 301 || response.statusCode == 201) {
                 return closeConnection(clientSocket);
             }
@@ -233,9 +251,9 @@ void ServerManager::sendResponse(int clientSocket) {
             //     modifyEpollEvent(clientSocket, EPOLLIN);
             // } else {
             // }
-                closeConnection(clientSocket);
+            closeConnection(clientSocket); // Adjust for keep-alive later if needed
+            break;
         }
-        break;
         default:
             break;
     }
@@ -255,7 +273,6 @@ void    ServerManager::handleConnections(int listeningSocket)
         std::cerr << e.what() << '\n';
     }
 }
-
 
 void ServerManager::readRequest(Client& Client) {
     uint8_t buffer[READ_BUFFER_SIZE];
@@ -279,8 +296,6 @@ void ServerManager::readRequest(Client& Client) {
     // if (bytesReceived > 0)
     //     requestBuffer.erase(requestBuffer.begin(), requestBuffer.begin() + bytesReceived);
 }
-
-
 
 void ServerManager::handleRequest(int clientSocket)
 {

@@ -31,38 +31,41 @@ wait
 */
 
 
-size_t    HttpRequest::parse(const uint8_t *buffer, size_t bufferLen)
-{
+size_t HttpRequest::parse(const uint8_t *buffer, size_t bufferLen) {
     this->_bufferLen = bufferLen;
     this->_buffer = buffer;
     size_t bytesReceived = 0;
+    std::cout << "Parsing State: " << state << "\n";
     try {
         if (state == REQUESTLINE) {
             bytesReceived += parseRequestLine();
+            std::cout << "After REQUESTLINE: bytesReceived=" << bytesReceived << ", state=" << state << "\n";
         }
         if (state == HEADERS) {
             bytesReceived += parseHeaders();
+            std::cout << "After HEADERS: bytesReceived=" << bytesReceived << ", state=" << state << "\n";
         }
         if (state == BODY) {
-            if (method != "POST") {
-                return state = COMPLETE, 0;
+            if (headers.count("content-length") || isChunked) {
+                bytesReceived += parseBody();
+                std::cout << "After BODY: bytesReceived=" << bytesReceived << ", state=" << state << "\n";
+            } else {
+                state = COMPLETE; // No body for GET/DELETE
+                std::cout << "No body, setting COMPLETE: bytesReceived=" << bytesReceived << ", state=" << state << "\n";
             }
-            bytesReceived += parseBody();
         }
-        if (state == COMPLETE)
-            return 0;
-    }
-    catch (int code)
-    {
+        if (state == COMPLETE) {
+            return bytesReceived; // Return total bytes parsed
+        }
+    } catch (int code) {
         setStatusCode(code);
         request.clear();
-        return state = COMPLETE, 0;
+        state = COMPLETE;
+        return bytesReceived;
+    } catch (const HttpIncompleteRequest& e) {
+        return bytesReceived;
     }
-    catch(const HttpIncompleteRequest& e)
-    {
-        return (bytesReceived);
-    }
-    return (bytesReceived);
+    return bytesReceived;
 }
 
 size_t    HttpRequest::parseRequestLine()
@@ -96,8 +99,9 @@ void    HttpRequest::RouteURI()
     
     for (routeIt = routesMap.begin(); routeIt != routesMap.end(); routeIt++) {
         if (uriPath.find(routeIt->first) == 0) {
-            if (routeIt->first.size() > routeKey.size())
+            if (routeIt->first.size() > routeKey.size()){
                 routeKey = routeIt->first;
+            }
         }
     }
     if (!routeKey.empty()) {
@@ -117,6 +121,11 @@ void    HttpRequest::RouteURI()
     }
     setStatusCode(checkFilePerms(uriPath)); 
 }
+
+std::string HttpRequest::getRequestrouteKey() {
+    return RequestrouteKey;
+}
+
 void    HttpRequest::validateMethod()
 {
     if (method != "GET" && method != "DELETE" && method != "POST")
@@ -153,7 +162,6 @@ void    HttpRequest::validateURI()
     if (!query.empty())
         uriQueryParams = decodeAndParseQuery(query);
 }
-
 
 std::map<std::string, std::string> HttpRequest::decodeAndParseQuery(std::string& query)
 {
@@ -349,19 +357,24 @@ size_t HttpRequest::parseBody() {
     }
 
     long contentLength;
-    try { contentLength = std::stol(headers["content-length"]);} // replace with _16_to_10 
+    try { contentLength = std::stol(headers["content-length"]); }
     catch (...) { throw 400; }
     if (contentLength > getConfig().max_body_size) { throw 413; }
-    std::ofstream ofile(getUploadDir() + "FILE_" + getFancyFilename(), std::ios::binary);
-    if (!ofile.is_open()) { throw 500; }
-    // body.clear(); // just incase 
-    // body.insert(body.end(), _buffer + _pos, _buffer + _pos + contentLength);
-    ofile.write((const char*)(_buffer + _pos), contentLength);
-    ofile.close();
+
+    std::cout << "Parsing Body at pos=" << _pos << ", bufferLen=" << _bufferLen << ", Content-Length=" << contentLength << "\n";
+
+    if (_bufferLen - _pos < static_cast<size_t>(contentLength)) {
+        std::cout << "Incomplete body: " << (_bufferLen - _pos) << " available, " << contentLength << " needed\n";
+        throw (HttpIncompleteRequest());
+    }
+
+    // // Store body for CGI
+    body.insert(body.end(), _buffer + _pos, _buffer + _pos + contentLength);
+    std::cout << "Body Parsed: " << std::string(body.begin(), body.end()) << "\n";
 
     _pos += contentLength;
     state = COMPLETE;
-    return (0);
+    return (_pos - startPos);
 }
 
 // still not tested with partial chunked requests

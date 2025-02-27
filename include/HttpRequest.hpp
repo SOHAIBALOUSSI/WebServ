@@ -45,7 +45,7 @@ class HttpRequest
         std::string originalUri;
         std::map<std::string, std::string> uriQueryParams;
         std::map<std::string, std::string> headers;
-        std::string  RequestrouteKey; // !!
+        std::string  RequestrouteKey;
         bool    isChunked;
         Route   routeConf;
         //request-line parsing
@@ -80,7 +80,7 @@ class HttpRequest
         ~HttpRequest();
 
 
-
+        std::string getRequestrouteKey();
         void    setStatusCode(long code) { statusCode = code; }
         std::string getDefaultIndex() { return defaultIndex; }
         long  getStatusCode() { return statusCode; }
@@ -100,7 +100,6 @@ class HttpRequest
         Config& getConfig() { return configs; }
         bool     getautoIndex () {return autoIndex; }
         Route&  getRouteConf() {return routeConf; }
-        std::string getRequestrouteKey() { return RequestrouteKey; }
         void    setURI(const std::string& _uri) { uri = _uri; }
         void    setURIpath(const std::string& _uripath) { uriPath = _uripath; }
         void  setBodyStartPos(size_t value) { bodyStart = value; }

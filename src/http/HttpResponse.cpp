@@ -313,6 +313,253 @@ void    HttpResponse::DELETE(HttpRequest& request) {
     }
 }
 
+bool HttpResponse::isCgiScript(HttpRequest& request)
+{
+    const std::string& uriPath = request.getUriPath();
+    
+    size_t extPos = uriPath.rfind('.');
+    if (extPos == std::string::npos || extPos == uriPath.length() - 1)
+        return false;
+    
+    extension = uriPath.substr(extPos);
+
+    for (size_t i = 0; i < extension.size(); ++i) {
+        extension[i] = tolower(extension[i]);
+    }
+    const std::map<std::string, Route>& routes = request.getConfig().getRoutes();
+    const std::string& routeKey = request.getRequestrouteKey();
+    
+    std::map<std::string, Route>::const_iterator routeIt = routes.find(routeKey);
+    if (routeIt == routes.end())
+        return false;
+
+    const std::vector<std::string>& cgiExtensions = routeIt->second.cgi_extensions;
+    for (std::vector<std::string>::const_iterator it = cgiExtensions.begin(); 
+         it != cgiExtensions.end(); 
+         ++it)
+    {
+        std::string allowedLower = *it;
+        for (size_t i = 0; i < allowedLower.size(); ++i) {
+            allowedLower[i] = tolower(allowedLower[i]);
+        }
+        
+        if (extension == allowedLower) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void HttpResponse::handleCgiScript(HttpRequest &request) {
+    const std::string &uriPath = request.getUriPath();
+    const std::string &routeKey = request.getRequestrouteKey();
+    const std::map<std::string, Route> &routes = request.getConfig().getRoutes();
+    std::map<std::string, Route>::const_iterator routeIt = routes.find(routeKey);
+
+    if (routeIt == routes.end()) {
+        statusCode = 404;
+        setErrorPage(request.getConfig().getErrorPages());
+        return;
+    }
+
+    if (access(uriPath.c_str(), F_OK) != 0) {
+        statusCode = 404;
+        setErrorPage(request.getConfig().getErrorPages());
+        return;
+    }
+
+    std::string queryString;
+    if (!request.getUriQueryParams().empty()) {
+        std::map<std::string, std::string>::const_iterator paramIt;
+        for (paramIt = request.getUriQueryParams().begin(); paramIt != request.getUriQueryParams().end(); ++paramIt) {
+            if (!queryString.empty())
+                queryString += "&";
+            queryString += paramIt->first + "=" + paramIt->second;
+        }
+    }
+
+    // Prepare CGI environment variables
+    std::string contentLengthStr = request.getHeaders().count("content-length") 
+        ? request.getHeaders()["content-length"] : "0";
+    std::string contentTypeStr = request.getHeaders().count("content-type") 
+        ? request.getHeaders()["content-type"] : "text/HTML";
+    std::string cookieStr = request.getHeaders().count("cookie") 
+        ? request.getHeaders()["cookie"] : "";
+
+    std::vector<std::string> envVars = {
+        "REQUEST_METHOD=" + request.getMethod(),
+        "QUERY_STRING=" + queryString,
+        "CONTENT_LENGTH=" + contentLengthStr,
+        "CONTENT_TYPE=" + contentTypeStr,
+        "SCRIPT_NAME=" + request.getOriginalUri(),
+        "SERVER_NAME=" + (!request.getConfig().server_names.empty() 
+            ? request.getConfig().server_names[0] : "localhost"),
+        "SERVER_PROTOCOL=HTTP/1.1",
+        "REMOTE_ADDR=127.0.0.1",
+        "GATEWAY_INTERFACE=CGI/1.1",
+        "REDIRECT_STATUS=200",
+        "SERVER_PORT=" + std::to_string(*request.getConfig().getPorts().begin()),
+        "SCRIPT_FILENAME=" + uriPath,
+        "PATH_INFO=" + request.getOriginalUri(),
+        "PATH_TRANSLATED=" + uriPath,
+        "HTTP_HOST=" + request.getHeaderValue("host"),
+        "HTTP_COOKIE=" + cookieStr
+    };
+
+    std::vector<char*> envp;
+    for (std::vector<std::string>::const_iterator envIt = envVars.begin(); envIt != envVars.end(); ++envIt) {
+        envp.push_back(strdup(envIt->c_str()));
+    }
+    envp.push_back(nullptr);
+
+    for (int i = 0; envp[i] != NULL; ++i) {
+        std::cout << "DEBUG ENV: " << envp[i] << "\n";
+    }
+
+    // Determine interpreter based on extension
+    std::string interpreter;
+    if (extension == ".php") {
+        interpreter = "/usr/bin/php-cgi";
+    } else if (extension == ".py") {
+        interpreter = "/usr/bin/python3";
+    } else if (extension == ".sh") {
+        interpreter = "/bin/sh"; // Added for shell scripts
+    } else {
+        statusCode = 500;
+        setErrorPage(request.getConfig().getErrorPages());
+        for (char* env : envp) free(env);
+        return;
+    }
+
+    int pipe_in[2];
+    int pipe_out[2];
+    if (pipe(pipe_in) == -1 || pipe(pipe_out) == -1) {
+        statusCode = 500;
+        setErrorPage(request.getConfig().getErrorPages());
+        for (std::vector<char*>::iterator envIt = envp.begin(); envIt != envp.end(); ++envIt) {
+            free(*envIt);
+        }
+        return;
+    }
+
+pid_t pid = fork();
+    if (pid == -1) {
+        std::cerr << "Fork failed: " << strerror(errno) << "\n";
+        statusCode = 500;
+        setErrorPage(request.getConfig().getErrorPages());
+        for (char* env : envp) free(env);
+        return;
+    }
+
+    if (pid == 0) { // Child process
+        close(pipe_in[1]);
+        dup2(pipe_in[0], STDIN_FILENO);
+        close(pipe_in[0]);
+        close(pipe_out[0]);
+        dup2(pipe_out[1], STDOUT_FILENO);
+        close(pipe_out[1]);
+        char* argv[] = {const_cast<char*>(interpreter.c_str()), 
+                        const_cast<char*>(uriPath.c_str()), nullptr};
+        execve(interpreter.c_str(), argv, envp.data());
+        std::cerr << "execve failed: " << strerror(errno) << "\n";
+        exit(1);
+    }
+
+    close(pipe_in[0]);
+    close(pipe_out[1]);
+
+    if (!request.getBody().empty()) {
+        std::string bodyStr(request.getBody().begin(), request.getBody().end());
+        std::cout << "Body Sent to CGI: " << bodyStr << "\n";
+        ssize_t bytesWritten = write(pipe_in[1], request.getBody().data(), request.getBody().size());
+        if (bytesWritten < 0) {
+            std::cerr << "Failed to write body: " << strerror(errno) << "\n";
+        } else {
+            std::cout << "Bytes Written to CGI: " << bytesWritten << "\n";
+        }
+    } else {
+        std::cout << "No Body Found in request.getBody() (Expected for GET)\n";
+    }
+    close(pipe_in[1]);
+
+    char buffer[READ_BUFFER_SIZE];
+    std::string cgiOutput;
+    ssize_t bytesRead;
+    while ((bytesRead = read(pipe_out[0], buffer, READ_BUFFER_SIZE - 1)) > 0) {
+        buffer[bytesRead] = '\0';
+        cgiOutput += buffer;
+    }
+    if (bytesRead < 0) {
+        std::cerr << "Read from CGI failed \n";
+    }
+    close(pipe_out[0]);
+    std::cout << "CGI Raw Output:\n" << cgiOutput << "\n---\n";
+
+    int status;
+    waitpid(pid, &status, 0);
+    std::cout << "CGI Exit Status: " << WEXITSTATUS(status) << "\n";
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        size_t headerEnd = cgiOutput.find("\r\n\r\n");
+        if (headerEnd == std::string::npos) {
+            headerEnd = cgiOutput.find("\n\n");
+        }
+        if (headerEnd == std::string::npos) {
+            std::cerr << "Malformed CGI output: no header-body separator\n";
+            statusCode = 500;
+            setErrorPage(request.getConfig().getErrorPages());
+            return;
+        }
+
+        std::string cgiHeaders = cgiOutput.substr(0, headerEnd);
+        std::string cgiBody = cgiOutput.substr(headerEnd + (cgiOutput[headerEnd] == '\r' ? 4 : 2));
+
+        statusCode = 200;
+        contentType = "text/html";
+        contentLength = cgiBody.size();
+        Date = getCurrentDateHeader();
+        Connection = getConnetionType(request.getHeaders());
+
+        std::vector<std::string> setCookieHeaders;
+        std::istringstream headerStream(cgiHeaders);
+        std::string line;
+        while (std::getline(headerStream, line) && !line.empty() && line != "\r") {
+            size_t colonPos = line.find(':');
+            if (colonPos != std::string::npos) {
+                std::string key = line.substr(0, colonPos);
+                std::string tempValue = line.substr(colonPos + 1);
+                std::string value = strTrim(tempValue);
+                if (key == "Status") {
+                    statusCode = std::stoi(value.substr(0, 3));
+                } else if (key == "Content-type") {
+                    contentType = value;
+                } else if (key == "Set-Cookie") {
+                    setCookieHeaders.push_back("Set-Cookie: " + value + "\r\n");
+                }
+            }
+        }
+
+        responseHeaders = "HTTP/1.1 " + std::to_string(statusCode) + " " + statusCodesMap[statusCode] + "\r\n" +
+                          "Date: " + Date + "\r\n" +
+                          "Content-Type: " + contentType + "\r\n" +
+                          "Content-Length: " + std::to_string(contentLength) + "\r\n" +
+                          "Server: EnginX\r\n" +
+                          "Connection: " + Connection + "\r\n";
+        for (const auto& cookieHeader : setCookieHeaders) {
+            responseHeaders += cookieHeader;
+        }
+        responseHeaders += "\r\n";
+        responseBody = cgiBody;
+
+        std::cout << "Response Headers:\n" << responseHeaders << "\n";
+        std::cout << "Response Body:\n" << responseBody << "\n";
+    } else {
+        std::cerr << "CGI execution failed with status: " << WEXITSTATUS(status) << "\n";
+        statusCode = 500;
+        setErrorPage(request.getConfig().getErrorPages());
+    }
+}
+
 void  HttpResponse::generateResponse(HttpRequest& request) {
     statusCode = request.getStatusCode();
     
@@ -324,7 +571,9 @@ void  HttpResponse::generateResponse(HttpRequest& request) {
     }
     
     std::string& method = request.getMethod();
-    if (method == "GET")
+     if (isCgiScript(request)) {
+      handleCgiScript(request);
+    } else if (method == "GET")
         GET(request);
     else if (method == "POST")
         POST(request);

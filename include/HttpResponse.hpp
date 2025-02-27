@@ -2,7 +2,13 @@
 
 #include <bits/stdc++.h>
 #include "HttpRequest.hpp"
-
+#include <sys/stat.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
 
 class HttpResponse
@@ -24,6 +30,7 @@ public:
     std::string Date;
     std::string Server;
     std::string Connection;
+    std::string extension;
     static std::map<int, std::string> statusCodesMap;
     static std::map<std::string, std::string> mimeTypes;
 
@@ -34,7 +41,8 @@ public:
     void    prepareHeaders(std::string& path, HttpRequest& request);
     void    setResponseStatusCode(unsigned code) { statusCode = code; }
     
-    
+    bool    isCgiScript(HttpRequest& request);
+    void    handleCgiScript(HttpRequest &request);
     void    GET(HttpRequest& request);
     void    POST(HttpRequest& request);
     void    DELETE(HttpRequest& request);
