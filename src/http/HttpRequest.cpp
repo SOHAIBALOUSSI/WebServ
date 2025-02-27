@@ -114,7 +114,6 @@ void    HttpRequest::RouteURI()
                 uriPath.replace(pos-1, routeKey.size(), routeConf.getRoot());
             }
         }
-        std::cout << "uri path = " << uriPath << std::endl;
     }
     setStatusCode(checkFilePerms(uriPath)); 
 }
